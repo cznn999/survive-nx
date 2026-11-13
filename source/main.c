@@ -702,13 +702,15 @@ int main(int argc, char *argv[]) {
   }
   dlog("[boot] survive_nx " PORT_VERSION " (Survive " SV_VERSION_NAME ")");
   {
-    /* leftovers of Unity's file-system probe from earlier versions */
+    /* leftovers from earlier versions: Unity's file-system probe and the
+     * old on-card copies of /dev/urandom and /proc data (.synth*) */
     static char names[32][128];
     int n = 0, removed = 0;
     DIR *d = opendir(GAME_HOME);
     struct dirent *e;
     while (d && n < 32 && (e = readdir(d)) != NULL)
-      if (!strncasecmp(e->d_name, "CASESENSITIVETEST", 17) && strlen(e->d_name) < 128)
+      if ((!strncasecmp(e->d_name, "CASESENSITIVETEST", 17) || !strncmp(e->d_name, ".synth", 6)) &&
+          strlen(e->d_name) < 128)
         strcpy(names[n++], e->d_name);
     if (d) closedir(d);
     for (int i = 0; i < n; i++) {
@@ -716,7 +718,7 @@ int main(int argc, char *argv[]) {
       snprintf(p, sizeof p, "%.380s/%.127s", GAME_HOME, names[i]);
       if (!unlink(p)) removed++;
     }
-    if (removed) dlog("[boot] removed %d CASESENSITIVETEST files", removed);
+    if (removed) dlog("[boot] removed %d leftover files", removed);
   }
   startup_status_begin("Preparing game data");
 

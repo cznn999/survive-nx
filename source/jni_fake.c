@@ -410,7 +410,8 @@ static void *dispatch_object(void *recv, const FakeID *id, va_list va) {
   /* String.getBytes() for PlayerPrefs keys. */
   if (recv && *(uint32_t *)recv == TAG_STRING && name_has(id->name, "getBytes")) {
     const char *u = ((FakeString *)recv)->utf; int n = (int)strlen(u);
-    char *d = malloc(n > 0 ? n : 1); if (n) memcpy(d, u, n);
+    char *d = malloc(n > 0 ? n : 1); if (!d) return NULL;
+    if (n) memcpy(d, u, n);
     return make_pri_array_adopt(d, n, 1);
   }
   if (unity_owns_class(id->cls)) return unity_dispatch_object(recv, id, va);
@@ -468,7 +469,8 @@ static void *new_object_dispatch(void *cls, void *mid, void *first_arg) {
     FakeID *m = mid;
     if (m && strstr(m->sig, "[B")) {              /* String([B...) */
       int len = 0; char *b = jni_bytearray_data(first_arg, &len);
-      if (b && len > 0) { char *t = malloc(len + 1); memcpy(t, b, len); t[len] = 0;
+      if (b && len > 0) { char *t = malloc(len + 1); if (!t) return jni_make_string("");
+        memcpy(t, b, len); t[len] = 0;
         void *s = jni_make_string(t); free(t); return s; }
       return jni_make_string("");
     }
@@ -639,7 +641,7 @@ static void j_GetStringUTFRegion(void *env, void *jstr, int start, int len, char
   if (start < 0) start = 0;
   if (start > slen) start = slen;
   if (len < 0) len = 0;
-  if (start + len > slen) len = slen - start;
+  if (len > slen - start) len = slen - start;
   memcpy(buf, s + start, (size_t)len);
   buf[len] = '\0';
 }
@@ -652,7 +654,7 @@ static void j_GetStringRegion(void *env, void *jstr, int start, int len, uint16_
   if (start < 0) start = 0;
   if (start > slen) start = slen;
   if (len < 0) len = 0;
-  if (start + len > slen) len = slen - start;
+  if (len > slen - start) len = slen - start;
   for (int i = 0; i < len; i++) buf[i] = (uint8_t)s[start + i];
 }
 static juint j_GetStringLength(void *env, void *jstr) {
@@ -707,13 +709,13 @@ static void j_ReleasePriArrayElements(void *env, void *arr, void *elems, int mod
 static void j_GetPriArrayRegion(void *env, void *arr, int start, int len, void *buf) {
   (void)env;
   FakePriArray *a = arr;
-  if (a && a->tag == TAG_PRIARR && start >= 0 && start + len <= a->len)
+  if (a && a->tag == TAG_PRIARR && buf && start >= 0 && len >= 0 && start <= a->len - len)
     memcpy(buf, (char *)a->data + (size_t)start * a->elem_size, (size_t)len * a->elem_size);
 }
 static void j_SetPriArrayRegion(void *env, void *arr, int start, int len, const void *buf) {
   (void)env;
   FakePriArray *a = arr;
-  if (a && a->tag == TAG_PRIARR && start >= 0 && start + len <= a->len)
+  if (a && a->tag == TAG_PRIARR && buf && start >= 0 && len >= 0 && start <= a->len - len)
     memcpy((char *)a->data + (size_t)start * a->elem_size, buf, (size_t)len * a->elem_size);
 }
 

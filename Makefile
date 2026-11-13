@@ -15,7 +15,7 @@ APP_TITLE := Survive
 APP_AUTHOR := cznn999
 # shown in the homebrew menu; the build number goes to debug.log
 APP_VERSION := 0.10
-PORT_BUILD  := 0.2.5
+PORT_BUILD  := 0.2.6
 APP_ICON  := $(TOPDIR)/icon.jpg
 export APP_TITLE APP_AUTHOR APP_VERSION APP_ICON
 BUILD     := build

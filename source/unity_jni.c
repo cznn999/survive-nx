@@ -62,7 +62,11 @@ static char *prefs_file(char *buf,size_t n){ snprintf(buf,n,"%s/prefs.kv",g_root
 static void kv_set(char type,const char*key,const char*val){
   for (int i=0;i<g_kv_n;i++) if(!strcmp(g_kv[i].key,key)){
     g_kv[i].type=type; free(g_kv[i].val); g_kv[i].val=strdup(val); g_kv_dirty=1; return; }
-  if (g_kv_n==g_kv_cap){ g_kv_cap=g_kv_cap?g_kv_cap*2:32; g_kv=realloc(g_kv,g_kv_cap*sizeof(KV)); }
+  if (g_kv_n==g_kv_cap){
+    int cap=g_kv_cap?g_kv_cap*2:32; KV*n=realloc(g_kv,cap*sizeof(KV));
+    if(!n) return;
+    g_kv=n; g_kv_cap=cap;
+  }
   g_kv[g_kv_n].type=type; g_kv[g_kv_n].key=strdup(key); g_kv[g_kv_n].val=strdup(val);
   g_kv_n++; g_kv_dirty=1;
 }
@@ -84,7 +88,7 @@ static void prefs_load(void){
   char line[2048];
   while (fgets(line,sizeof line,f)){
     char *nl=strchr(line,'\n'); if(nl)*nl=0;
-    if(!line[0]) continue;
+    if(!line[0] || line[1]!='\t') continue;   /* "T\tkey\tval" */
     char type=line[0]; char *k=line+2;            /* "T\tkey\tval"          */
     char *t1=strchr(k,'\t'); if(!t1) continue; *t1=0; char*v=t1+1;
     kv_set(type, unesc(k), unesc(v));

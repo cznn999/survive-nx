@@ -37,19 +37,20 @@ replaces the cursor.
 
 ## Controls
 
+Survive is played only by tapping the screen. On the Switch a cursor is shown
+on the screen and moved with the right stick; pressing A taps where it points.
+
 | Input | Action |
 | --- | --- |
-| Touchscreen | the game's own touch controls (multitouch, handheld) |
-| Left stick | movement (a finger on the on-screen joystick) |
-| Right stick | look around (a finger dragged over the screen) |
-| ZL | show / hide the cursor |
-| Right stick (cursor shown) | move the cursor |
-| A / ZR (cursor shown) | tap at the cursor |
-| D-pad up / down (cursor shown) | cursor speed |
+| Right stick | move the cursor |
+| A / ZR | tap at the cursor |
+| ZL | hide / show the cursor |
+| D-pad up / down | cursor speed |
 | B | Android back |
+| Touchscreen | tap directly (handheld) |
 | USB mouse | move the cursor, left click taps |
 
-Cursor and mouse speeds are saved in `pointer.cfg`.
+The cursor speed is saved in `pointer.cfg`.
 
 ## Configuration
 
@@ -57,9 +58,7 @@ Cursor and mouse speeds are saved in `pointer.cfg`.
 
 | Key | Meaning |
 | --- | --- |
-| `joy_x` `joy_y` `joy_radius` | centre and radius of the movement joystick (fractions of the screen, 0,0 top left) |
-| `look_x` `look_y` `look_speed` `invert_y` | where the look finger starts, its speed, inverted vertical look |
-| `button_<A\|B\|X\|Y\|L\|R\|ZR\|PLUS\|MINUS\|RSTICK> x,y` | make a button tap a fixed point of the screen, e.g. `button_X 0.880,0.780` |
+| `button_<X\|Y\|L\|R\|PLUS\|MINUS\|RSTICK> x,y` | make a button tap a fixed point of the screen, e.g. `button_X 0.880,0.780` (fractions of the screen, 0,0 top left) |
 | `debug` | `1` writes a detailed `debug.log` and `watchdog.log` (for bug reports; slower) |
 
 Saves are in `/switch/survive_nx/save/`.

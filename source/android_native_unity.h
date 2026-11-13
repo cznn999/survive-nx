@@ -54,5 +54,9 @@ int  fakefd_pipe(int fds[2]);
 long fakefd_read(int fd, void *buf, unsigned long n);
 long fakefd_write(int fd, const void *buf, unsigned long n);
 int  fakefd_close(int fd);
+int  fakefd_open_mem(const void *data, unsigned long len);
+int  fakefd_open_random(void);
+long fakefd_lseek(int fd, long off, int whence);
+int  fakefd_kind(int fd, unsigned long *size);
 
 #endif

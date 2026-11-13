@@ -404,6 +404,7 @@ static long ra_read(struct RaCache *c, int fd, void *buf, size_t count) {
 /* off_t is 64-bit on this target, so this also services lseek64. */
 long z_lseek(int fd, long off, int whence) {
   if (asset_pack_fd_is(fd)) return asset_pack_lseek_fd(fd, off, whence);
+  if (fakefd_is_fake(fd)) return fakefd_lseek(fd, off, whence);
   struct RaCache *c = ra_find(fd);
   if (c) {   /* virtualized position -- don't touch the real fd here */
     mutexLock(&g_ra_lock);
@@ -417,29 +418,26 @@ long z_lseek(int fd, long off, int whence) {
 
 static const char *synthetic_proc(const char *path);  /* defined below */
 
-/* Materialize synthetic procfs data behind a real descriptor. */
+/* Synthetic procfs data behind a private in-memory descriptor (fakefd.c).
+ * Earlier versions wrote it to a shared file on the SD card, which raced
+ * between threads and left the process memory map on the card. */
 static int synth_proc_open(const char *path) {
   if (!path) return -1;
   if (strncmp(path, "/proc/", 6) && strncmp(path, "/sys/", 5)) return -1;
-  static char buf[16384];
-  int len;
   if (!strcmp(path, "/proc/self/maps") || !strcmp(path, "/proc/self/smaps")) {
-    len = so_dump_maps(buf, sizeof buf);
-  } else {
-    const char *s = synthetic_proc(path);
-    if (!s) return -1;                                   // not /proc or /sys
-    len = (int)strlen(s);
-    if (len > (int)sizeof buf) len = (int)sizeof buf;
-    memcpy(buf, s, (size_t)len);
+    const size_t cap = 16384;
+    char *buf = malloc(cap);
+    if (!buf) return -1;
+    int len = so_dump_maps(buf, cap);
+    if (len < 0) len = 0;
+    if ((size_t)len > cap) len = (int)cap;
+    int fd = fakefd_open_mem(buf, (unsigned long)len);
+    free(buf);
+    return fd;
   }
-  char safe[160]; size_t j = 0;
-  for (const char *p = path; *p && j < sizeof safe - 1; p++) safe[j++] = (*p == '/') ? '_' : *p;
-  safe[j] = '\0';
-  char tf[256];
-  snprintf(tf, sizeof tf, "%s/.synth%s", GAME_HOME, safe);
-  int wfd = open(tf, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (wfd >= 0) { if (write(wfd, buf, (size_t)len) < 0) { /* best effort */ } close(wfd); }
-  return open(tf, O_RDONLY);
+  const char *s = synthetic_proc(path);
+  if (!s) return -1;                                   // not /proc or /sys
+  return fakefd_open_mem(s, strlen(s));
 }
 
 /* Stable synthetic inode numbers for files reported as inode zero by fsdev. */
@@ -459,15 +457,8 @@ static int open_fake_impl(const char *path, int flags, int mode) {
   if (!writing) {
     /* Back Android random devices with libnx entropy. */
     if (!strcmp(path, "/dev/urandom") || !strcmp(path, "/dev/random")) {
-      static char rbuf[65536];
-      randomGet(rbuf, sizeof rbuf);
-      char tf[256];
-      snprintf(tf, sizeof tf, "%s/.synth_dev_random", GAME_HOME);
-      int wfd = open(tf, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-      if (wfd >= 0) { if (write(wfd, rbuf, sizeof rbuf) < 0) { /* best effort */ } close(wfd); }
-      int rfd = open(tf, O_RDONLY);
-      fd_ino_set(rfd, path);
-      return rfd;
+      /* every read comes from the system CSPRNG; nothing is stored */
+      return fakefd_open_random();
     }
     int sfd = synth_proc_open(path);
     if (sfd >= 0) { fd_ino_set(sfd, path); return sfd; }
@@ -557,6 +548,18 @@ int fstat_fake(int fd, struct bionic_stat *st) {
     st->st_size = (int64_t)packed_size;
     st->st_blksize = 4096;
     st->st_blocks = (int64_t)((packed_size + 511) / 512);
+    return 0;
+  }
+  if (fakefd_is_fake(fd)) {
+    unsigned long size = 0;
+    int k = fakefd_kind(fd, &size);
+    if (k < 0) { errno = EBADF; return -1; }
+    memset(st, 0, sizeof(*st));
+    st->st_ino = (uint64_t)fd;
+    st->st_mode = k == 1 ? S_IFREG | 0444 : k == 2 ? S_IFCHR | 0444 : S_IFIFO | 0600;
+    st->st_nlink = 1;
+    st->st_size = k == 1 ? (int64_t)size : 0;
+    st->st_blksize = 4096;
     return 0;
   }
   struct stat real; const int r = fstat(fd, &real);
@@ -1090,8 +1093,10 @@ int madvise_fake(void *addr, size_t len, int advice) {
 
 char *realpath_fake(const char *path, char *resolved) {
   if (!path) return NULL;          /* POSIX: realpath(NULL,..) is an error, not a crash */
-  if (!resolved) resolved = malloc(0x1000);
-  strcpy(resolved, path);
+  size_t n = strlen(path);
+  if (n >= 4096) { errno = ENAMETOOLONG; return NULL; }   /* bionic PATH_MAX */
+  if (!resolved && !(resolved = malloc(4096))) { errno = ENOMEM; return NULL; }
+  memcpy(resolved, path, n + 1);
   return resolved;
 }
 int strerror_r_fake(int err, char *buf, size_t len) { snprintf(buf, len, "%s", strerror(err)); return 0; }
@@ -1386,13 +1391,21 @@ static unsigned sa_b2n(const void *bsa, unsigned blen, unsigned char out[128]) {
   out[1] = (unsigned char)af_b2n(b[0] | (b[1] << 8)); /* BSD u8 family */
   return n;
 }
+/* Copy a native address into the caller's buffer, never more than its
+ * *boutlen bytes; *boutlen then holds the full length (POSIX). */
 static void sa_n2b(const unsigned char *nsa, unsigned n, void *bout, unsigned *boutlen) {
-  if (!bout) { if (boutlen) *boutlen = 0; return; }
+  if (!bout || !boutlen) { if (boutlen) *boutlen = 0; return; }
   unsigned c = n > 128 ? 128 : n;
-  if (c >= 2) { memcpy(bout, nsa, c); int fam = af_n2b(nsa[1]);
-                ((unsigned char *)bout)[0] = (unsigned char)(fam & 0xFF);
-                ((unsigned char *)bout)[1] = (unsigned char)((fam >> 8) & 0xFF); }
-  if (boutlen) *boutlen = c;
+  unsigned room = *boutlen;
+  if (c >= 2) {
+    unsigned char tmp[128];
+    memcpy(tmp, nsa, c);
+    int fam = af_n2b(nsa[1]);
+    tmp[0] = (unsigned char)(fam & 0xFF);
+    tmp[1] = (unsigned char)((fam >> 8) & 0xFF);
+    memcpy(bout, tmp, c < room ? c : room);
+  }
+  *boutlen = c;
 }
 #define B_SOCK_NONBLOCK 0x800
 #define B_SOCK_CLOEXEC  0x80000
@@ -1440,8 +1453,42 @@ int connect_fake(int s, const void *a, unsigned l) {
   if (r < 0) NET_FAIL();
   return r;
 }
-long recvmsg_fake(int s, void *msg, int flags) { long r = recvmsg(s, (struct msghdr *)msg, msg_b2n(flags)); if (r < 0) NET_FAIL(); return r; }
-long sendmsg_fake(int s, const void *msg, int flags) { long r = sendmsg(s, (const struct msghdr *)msg, msg_b2n(flags)); if (r < 0) NET_FAIL(); return r; }
+/* bionic arm64 msghdr: size_t iovlen and controllen, flags at +48; libnx has
+ * int/socklen_t there and flags at +44, so translate instead of passing it
+ * through. Ancillary data (cmsghdr layouts differ too) is not passed. */
+struct b_msghdr { void *name; unsigned namelen; void *iov; size_t iovlen;
+                  void *control; size_t controllen; int flags; };
+long recvmsg_fake(int s, void *msg, int flags) {
+  struct b_msghdr *bm = (struct b_msghdr *)msg;
+  if (!bm || bm->iovlen > 1024) { errno = EINVAL; return -1; }
+  unsigned char nsa[128];
+  struct msghdr m = {0};
+  m.msg_name = bm->name ? nsa : NULL;
+  m.msg_namelen = bm->name ? sizeof nsa : 0;
+  m.msg_iov = (struct iovec *)bm->iov;
+  m.msg_iovlen = (int)bm->iovlen;
+  long r = recvmsg(s, &m, msg_b2n(flags));
+  if (r < 0) { NET_FAIL(); return r; }
+  if (bm->name) sa_n2b(nsa, m.msg_namelen, bm->name, &bm->namelen);
+  bm->controllen = 0;
+  bm->flags = m.msg_flags;
+  return r;
+}
+long sendmsg_fake(int s, const void *msg, int flags) {
+  const struct b_msghdr *bm = (const struct b_msghdr *)msg;
+  if (!bm || bm->iovlen > 1024) { errno = EINVAL; return -1; }
+  unsigned char nsa[128];
+  struct msghdr m = {0};
+  if (bm->name && bm->namelen) {
+    m.msg_name = nsa;
+    m.msg_namelen = sa_b2n(bm->name, bm->namelen, nsa);
+  }
+  m.msg_iov = (struct iovec *)bm->iov;
+  m.msg_iovlen = (int)bm->iovlen;
+  long r = sendmsg(s, &m, msg_b2n(flags));
+  if (r < 0) NET_FAIL();
+  return r;
+}
 int inet_pton_shim(int af, const char *src, void *dst) { return inet_pton(af_b2n(af), src, dst); }
 const char *inet_ntop_shim(int af, const void *src, char *dst, unsigned size) { return inet_ntop(af_b2n(af), src, dst, size); }
 int bind_fake(int s, const void *a, unsigned l) {
@@ -1517,6 +1564,12 @@ void freeaddrinfo_fake(void *res) {
 }
 /* Translate bionic O_NONBLOCK. */
 int fcntl_shim(int fd, int cmd, int arg) {
+  if (fakefd_is_fake(fd) && fakefd_kind(fd, NULL) > 0) {   /* memory / random */
+    if (cmd == 3 /*F_GETFL*/) return O_RDONLY;
+    if (cmd == 4 /*F_SETFL*/ || cmd == 2 /*F_SETFD*/ || cmd == 1 /*F_GETFD*/) return 0;
+    errno = EINVAL;
+    return -1;
+  }
   if (asset_pack_fd_is(fd)) {
     if (cmd == 0 /*F_DUPFD*/ || cmd == 1030 /*F_DUPFD_CLOEXEC*/)
       return asset_pack_dup_fd(fd);

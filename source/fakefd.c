@@ -7,13 +7,15 @@
 #include <switch.h>
 
 #define FAKE_FD_BASE 0x40000000
-#define MAX_FAKE_FDS 32
+#define MAX_FAKE_FDS 64
 #define PIPE_CAP     4096
 
-enum { FD_NONE = 0, FD_PIPE_R, FD_PIPE_W };
+/* FD_MEM: a private read-only copy of synthetic file data (/proc, /sys).
+ * FD_RANDOM: /dev/urandom, every read straight from the system CSPRNG. */
+enum { FD_NONE = 0, FD_PIPE_R, FD_PIPE_W, FD_MEM, FD_RANDOM };
 
 typedef struct { uint8_t buf[PIPE_CAP]; size_t head, len; int refs; } Pipe;
-typedef struct { int kind; Pipe *pipe; } FakeFd;
+typedef struct { int kind; Pipe *pipe; uint8_t *data; size_t len, pos; } FakeFd;
 
 static FakeFd  g_fds[MAX_FAKE_FDS];
 static Mutex   g_lock;
@@ -76,6 +78,20 @@ long fakefd_read(int fd, void *buf, unsigned long n) {
   if (slot < 0 || slot >= MAX_FAKE_FDS) return -1;
   fakefd_once();
   mutexLock(&g_lock);
+  if (g_fds[slot].kind == FD_RANDOM) {
+    mutexUnlock(&g_lock);
+    randomGet(buf, n);
+    return (long)n;
+  }
+  if (g_fds[slot].kind == FD_MEM) {
+    FakeFd *f = &g_fds[slot];
+    size_t take = f->pos < f->len ? f->len - f->pos : 0;
+    if (take > n) take = n;
+    memcpy(buf, f->data + f->pos, take);
+    f->pos += take;
+    mutexUnlock(&g_lock);
+    return (long)take;
+  }
   Pipe *p = g_fds[slot].pipe;
   if (g_fds[slot].kind != FD_PIPE_R || !p) { mutexUnlock(&g_lock); return -1; }
   /* block until data arrives or all writers close (refs drops to the reader) */
@@ -98,8 +114,61 @@ int fakefd_close(int fd) {
   mutexLock(&g_lock);
   FakeFd *f = &g_fds[slot];
   if (f->pipe && --f->pipe->refs <= 0) free(f->pipe);
+  free(f->data);
   memset(f, 0, sizeof(*f));
   condvarWakeAll(&g_cond);      /* wake any blocked reader -> treats as EOF */
   mutexUnlock(&g_lock);
   return 0;
+}
+
+static int open_kind(int kind, const void *data, size_t len) {
+  fakefd_once();
+  uint8_t *copy = NULL;
+  if (kind == FD_MEM) {
+    copy = malloc(len ? len : 1);
+    if (!copy) return -1;
+    if (len) memcpy(copy, data, len);
+  }
+  mutexLock(&g_lock);
+  int i = alloc_slot();
+  if (i < 0) { mutexUnlock(&g_lock); free(copy); return -1; }
+  g_fds[i].kind = kind;
+  g_fds[i].pipe = NULL;
+  g_fds[i].data = copy;
+  g_fds[i].len = len;
+  g_fds[i].pos = 0;
+  mutexUnlock(&g_lock);
+  return FAKE_FD_BASE + i;
+}
+
+int fakefd_open_mem(const void *data, unsigned long len) { return open_kind(FD_MEM, data, len); }
+int fakefd_open_random(void) { return open_kind(FD_RANDOM, NULL, 0); }
+
+long fakefd_lseek(int fd, long off, int whence) {
+  const int slot = fd - FAKE_FD_BASE;
+  if (slot < 0 || slot >= MAX_FAKE_FDS) return -1;
+  fakefd_once();
+  mutexLock(&g_lock);
+  FakeFd *f = &g_fds[slot];
+  long r = -1;
+  if (f->kind == FD_RANDOM) {
+    r = 0;
+  } else if (f->kind == FD_MEM) {
+    long base = whence == 0 ? 0 : whence == 1 ? (long)f->pos : (long)f->len;
+    if (base + off >= 0) { f->pos = (size_t)(base + off); r = (long)f->pos; }
+  }
+  mutexUnlock(&g_lock);
+  return r;
+}
+
+/* 0 pipe, 1 memory file (size in *size), 2 character device, -1 not open */
+int fakefd_kind(int fd, unsigned long *size) {
+  const int slot = fd - FAKE_FD_BASE;
+  if (slot < 0 || slot >= MAX_FAKE_FDS) return -1;
+  fakefd_once();
+  mutexLock(&g_lock);
+  int k = g_fds[slot].kind;
+  if (size) *size = g_fds[slot].len;
+  mutexUnlock(&g_lock);
+  return k == FD_MEM ? 1 : k == FD_RANDOM ? 2 : k == FD_NONE ? -1 : 0;
 }
