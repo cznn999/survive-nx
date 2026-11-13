@@ -1,0 +1,28 @@
+/build/
+/release_build/
+/sd_stage/
+/tools/re/
+
+/*.apk
+/*.elf
+/*.nacp
+/*.nro
+
+*.log
+*.csv
+fatal.txt
+__pycache__/
+*.py[cod]
+
+# --- game binaries: NEVER commit these (Sandbay Games copyright). The build.yml guard
+#     job also blocks them, but keep them out of `git add -A` in the first place.
+*.so
+lib/
+assets/
+il2cpp/
+*.obb
+*.xapk
+*.pack
+*.dat
+dump.cs
+global-metadata*
