@@ -32,9 +32,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install portlibs
-        run: dkp-pacman -Sy --noconfirm --needed switch-mesa switch-libdrm_nouveau switch-sdl2 switch-libpng switch-zlib
-
       - name: Build
         run: make -j$(nproc)
         env:
